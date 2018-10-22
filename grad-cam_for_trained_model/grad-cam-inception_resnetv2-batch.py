@@ -1,5 +1,5 @@
-from keras.applications.vgg16 import (
-    VGG16, preprocess_input, decode_predictions)
+from keras.applications.inception_resnet_v2 import (
+    InceptionResNetV2, preprocess_input)
 from keras.preprocessing import image
 from keras.layers.core import Lambda
 from keras.models import Sequential
@@ -8,8 +8,40 @@ import keras.backend as K
 import tensorflow as tf
 import numpy as np
 import keras
+from keras.models import load_model
 import sys
 import cv2
+import os, glob
+from keras.applications import imagenet_utils
+
+def decode_predictions(preds, top=5):
+    """Decodes the prediction of an ImageNet model.
+
+    # Arguments
+        preds: Numpy tensor encoding a batch of predictions.
+        top: Integer, how many top-guesses to return.
+
+    # Returns
+        A list of lists of top class prediction tuples
+        `(class_name, class_description, score)`.
+        One list of tuples per sample in batch input.
+
+    # Raises
+        ValueError: In case of invalid shape of the `pred` array
+            (must be 2D).
+    """
+    if len(preds.shape) != 2 or preds.shape[1] != nb_classes:
+        raise ValueError('`decode_predictions` expects '
+                         'a batch of predictions '
+                         '(i.e. a 2D array of shape (samples, 2)). '
+                         'Found array with shape: ' + str(preds.shape))
+    results = []
+    for pred in preds:
+        top_indices = pred.argsort()[-top:][::-1]
+        result = [tuple(str(i)) + (pred[i],) for i in top_indices]
+        result.sort(key=lambda x: x[1], reverse=True)
+        results.append(result)
+    return results
 
 def target_category_loss(x, category_index, nb_classes):
     return tf.multiply(x, K.one_hot([category_index], nb_classes))
@@ -24,10 +56,11 @@ def normalize(x):
 def load_image(path):
     #img_path = sys.argv[1]
     img_path = path
-    img = image.load_img(img_path, target_size=(224, 224))
+    img = image.load_img(img_path, target_size=(299, 299))
     x = image.img_to_array(img)
     x = np.expand_dims(x, axis=0)
     x = preprocess_input(x)
+    #display_image = imagenet_utils.preprocess_input(x, mode='caffe')
     return x
 
 def register_gradient():
@@ -38,7 +71,7 @@ def register_gradient():
             return grad * tf.cast(grad > 0., dtype) * \
                 tf.cast(op.inputs[0] > 0., dtype)
 
-def compile_saliency_function(model, activation_layer='block5_conv3'):
+def compile_saliency_function(model, activation_layer='conv_7b'):
     input_img = model.input
     layer_dict = dict([(layer.name, layer) for layer in model.layers[1:]])
     layer_output = layer_dict[activation_layer].output
@@ -60,7 +93,7 @@ def modify_backprop(model, name):
                 layer.activation = tf.nn.relu
 
         # re-instanciate a new model
-        new_model = VGG16(weights='imagenet')
+        new_model = InceptionResNetV2(weights='imagenet')
     return new_model
 
 def deprocess_image(x):
@@ -87,7 +120,7 @@ def deprocess_image(x):
     return x
 
 def grad_cam(input_model, image, category_index, layer_name):
-    nb_classes = 1000
+
     target_layer = lambda x: target_category_loss(x, category_index, nb_classes)
 
     x = input_model.layers[-1].output
@@ -96,7 +129,7 @@ def grad_cam(input_model, image, category_index, layer_name):
 
     loss = K.sum(model.layers[-1].output)
     #conv_output = [l for l in model.layers[0].layers if l.name is layer_name][0].output
-    conv_output = [l for l in model.layers if l.name is layer_name][0].output
+    conv_output = [l for l in model.layers if l.name == layer_name][0].output
 
     grads = normalize(K.gradients(loss, conv_output)[0])
     gradient_function = K.function([model.layers[0].input], [conv_output, grads])
@@ -110,11 +143,12 @@ def grad_cam(input_model, image, category_index, layer_name):
     for i, w in enumerate(weights):
         cam += w * output[:, :, i]
 
-    cam = cv2.resize(cam, (224, 224))
+    cam = cv2.resize(cam, (299, 299))
     cam = np.maximum(cam, 0)
     heatmap = cam / np.max(cam)
 
     #Return to BGR [0..255] from the preprocessed image
+    image *= 128
     image = image[0, :]
     image -= np.min(image)
     image = np.minimum(image, 255)
@@ -125,22 +159,42 @@ def grad_cam(input_model, image, category_index, layer_name):
     return np.uint8(cam), heatmap
 
 #preprocessed_input = load_image(sys.argv[1])
-preprocessed_input = load_image("./examples/boat.jpg")
+input_folder = 'b9'
+experiment_name = 'baseline_try2'
+nb_classes = 2
 
-model = VGG16(weights='imagenet')
+output_folder = '../results/' + input_folder + '_' + experiment_name + '_InceptionResNetV2_output/'
+model_name = 'trained_model_inception-resnetv2_tl_baseline.h5'
+model_dir = '../models/'
 
-predictions = model.predict(preprocessed_input)
-top_1 = decode_predictions(predictions)[0][0]
-print('Predicted class:')
-print('%s (%s) with probability %.2f' % (top_1[1], top_1[0], top_1[2]))
+if not os.path.exists(output_folder):
+    os.mkdir(output_folder)
 
-predicted_class = np.argmax(predictions)
-cam, heatmap = grad_cam(model, preprocessed_input, predicted_class, "block5_conv3")
-cv2.imwrite("gradcam.jpg", cam)
-
+# load model
+model = load_model(os.path.join(model_dir, experiment_name, model_name))
 register_gradient()
 guided_model = modify_backprop(model, 'GuidedBackProp')
 saliency_fn = compile_saliency_function(guided_model)
-saliency = saliency_fn([preprocessed_input, 0])
-gradcam = saliency[0] * heatmap[..., np.newaxis]
-cv2.imwrite("guided_gradcam.jpg", deprocess_image(gradcam))
+
+count = 0
+for sample in glob.glob('../examples/' + input_folder +'/*.jpg'):
+    preprocessed_input = load_image(sample)
+    image_name = sample.split('\\')[-1].split('.jpg')[0]
+
+    predictions = model.predict(preprocessed_input)
+    top_1 = decode_predictions(predictions)[0][0]
+    #print('Predicted class:')
+    #print('%s (%s) with probability %.2f' % (top_1[1], top_1[0], top_1[2]))
+    count += 1
+    print('current number of image processed: ',count)
+
+    predicted_class = np.argmax(predictions)
+    cam, heatmap = grad_cam(model, preprocessed_input, predicted_class, "conv_7b")
+    cv2.imwrite(output_folder + "gradcam_" + image_name + "_predict_" +str(top_1[0])+ '_' + str(top_1[1]) + ".jpg", cam)
+
+
+    saliency = saliency_fn([preprocessed_input, 0])
+    gradcam = saliency[0] * heatmap[..., np.newaxis]
+    cv2.imwrite(output_folder + "guided_gradcam_" + image_name + "_predict_" +str(top_1[0])+ '_' + str(top_1[1]) + ".jpg", deprocess_image(gradcam))
+
+print('This is experiment ', experiment_name)

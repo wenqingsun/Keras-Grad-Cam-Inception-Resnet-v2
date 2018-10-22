@@ -10,6 +10,7 @@ import numpy as np
 import keras
 import sys
 import cv2
+import os, glob
 
 def target_category_loss(x, category_index, nb_classes):
     return tf.multiply(x, K.one_hot([category_index], nb_classes))
@@ -125,22 +126,35 @@ def grad_cam(input_model, image, category_index, layer_name):
     return np.uint8(cam), heatmap
 
 #preprocessed_input = load_image(sys.argv[1])
-preprocessed_input = load_image("./examples/boat.jpg")
+input_folder = 'VOC_samples'
+output_folder = './results/' + input_folder +'_VGG16_output/'
 
+if not os.path.exists(output_folder):
+    os.mkdir(output_folder)
+
+# load model
 model = VGG16(weights='imagenet')
-
-predictions = model.predict(preprocessed_input)
-top_1 = decode_predictions(predictions)[0][0]
-print('Predicted class:')
-print('%s (%s) with probability %.2f' % (top_1[1], top_1[0], top_1[2]))
-
-predicted_class = np.argmax(predictions)
-cam, heatmap = grad_cam(model, preprocessed_input, predicted_class, "block5_conv3")
-cv2.imwrite("gradcam.jpg", cam)
-
 register_gradient()
 guided_model = modify_backprop(model, 'GuidedBackProp')
 saliency_fn = compile_saliency_function(guided_model)
-saliency = saliency_fn([preprocessed_input, 0])
-gradcam = saliency[0] * heatmap[..., np.newaxis]
-cv2.imwrite("guided_gradcam.jpg", deprocess_image(gradcam))
+
+count = 0
+for sample in glob.glob('./examples/' + input_folder +'/*.jpg'):
+    preprocessed_input = load_image(sample)
+    image_name = sample.split('\\')[-1].split('.jpg')[0]
+
+    predictions = model.predict(preprocessed_input)
+    top_1 = decode_predictions(predictions)[0][0]
+    #print('Predicted class:')
+    #print('%s (%s) with probability %.2f' % (top_1[1], top_1[0], top_1[2]))
+    count += 1
+    print('current number of image processed: ',count)
+
+    predicted_class = np.argmax(predictions)
+    cam, heatmap = grad_cam(model, preprocessed_input, predicted_class, "block5_conv3")
+    cv2.imwrite(output_folder + "gradcam_" + image_name + "_predict_" +str(top_1[1])+ '_' + str(top_1[2]) + ".jpg", cam)
+
+
+    saliency = saliency_fn([preprocessed_input, 0])
+    gradcam = saliency[0] * heatmap[..., np.newaxis]
+    cv2.imwrite(output_folder + "guided_gradcam_" + image_name + "_predict_" +str(top_1[1])+ '_' + str(top_1[2]) + ".jpg", deprocess_image(gradcam))
