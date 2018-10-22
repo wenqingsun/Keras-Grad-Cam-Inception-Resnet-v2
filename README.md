@@ -1,4 +1,5 @@
 ## Grad-CAM implementation in Keras ##
+Part of the code borrowed from https://github.com/jacobgil/keras-grad-cam
 
 Able to run in keras 2.0
 
